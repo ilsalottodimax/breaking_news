@@ -1,0 +1,32 @@
+name: Cinema News
+
+on:
+  schedule:
+    # Lun/Mer/Ven alle 07:00 UTC = 08:00 ora italiana (CET) / 09:00 CEST
+    # In estate (CEST, UTC+2) usa 06:00 UTC per le 08:00 italiane
+    - cron: "0 7 * * 1,3,5"
+  workflow_dispatch: # permette di avviarlo manualmente per testarlo
+
+jobs:
+  send-news:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run script
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python fetch_news.py
