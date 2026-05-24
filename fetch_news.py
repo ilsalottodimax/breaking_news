@@ -71,8 +71,6 @@ def fetch_from_tavily(source_name, domain):
             },
             timeout=30,
         )
-    if not resp.ok:
-        print(f"Tavily error per {source_name}: {resp.status_code} {resp.text}")
         if not resp.ok:
             print(f"Tavily error per {source_name}: {resp.status_code} {resp.text}")
             continue
