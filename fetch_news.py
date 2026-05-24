@@ -14,7 +14,17 @@ SOURCES = {
 }
 
 ARTICLES_PER_SITE = 3
-CINEMA_QUERY = "cinema film movie Hollywood release"
+
+# Query mirata solo su nuove uscite e annunci di film
+RELEASE_QUERY = "new movie film release date announced 2025 2026"
+
+# Parole nel titolo che indicano contenuto da escludere
+EXCLUDE_TITLE_KEYWORDS = {
+    "interview", "review", "opinion", "column", "podcast", "ranking",
+    "best of", "worst of", "list", "quiz", "gallery", "photos", "watch",
+    "recap", "explainer", "analysis", "awards season", "box office report",
+    "streaming guide", "where to watch",
+}
 
 TAVILY_API_KEY = os.environ["TAVILY_API_KEY"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
@@ -23,15 +33,31 @@ GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
 EMAIL_TO = os.environ.get("EMAIL_TO", GMAIL_USER)
 
 
+def is_release_news(title):
+    title_lower = title.lower()
+    if any(kw in title_lower for kw in EXCLUDE_TITLE_KEYWORDS):
+        return False
+    release_signals = {
+        "release", "release date", "sets release", "coming to", "arrives",
+        "premiere", "first look", "trailer", "teaser", "greenlit", "green-lit",
+        "in production", "starts production", "begins filming", "wraps",
+        "acquired", "buys", "picks up", "lands", "sets", "announced",
+        "cast", "joins", "attached", "taps", "hires", "will star",
+    }
+    return any(kw in title_lower for kw in release_signals)
+
+
 def fetch_from_tavily(source_name, domain):
     resp = requests.post(
         "https://api.tavily.com/search",
         json={
             "api_key": TAVILY_API_KEY,
-            "query": CINEMA_QUERY,
-            "search_depth": "basic",
+            "query": RELEASE_QUERY,
+            "search_depth": "advanced",
+            "topic": "news",
+            "days": 3,
             "include_domains": [domain],
-            "max_results": ARTICLES_PER_SITE,
+            "max_results": 10,  # ne chiediamo di più per poter filtrare
         },
         timeout=30,
     )
@@ -42,12 +68,18 @@ def fetch_from_tavily(source_name, domain):
     results = resp.json().get("results", [])
     articles = []
     for r in results:
+        if len(articles) >= ARTICLES_PER_SITE:
+            break
+        title = r.get("title", "").strip()
+        if not is_release_news(title):
+            print(f"  [skip] {title}")
+            continue
         articles.append({
-            "title": r.get("title", "").strip(),
+            "title": title,
             "link": r.get("url", ""),
             "summary": r.get("content", "")[:600].strip(),
         })
-    print(f"{source_name}: {len(articles)} articoli trovati")
+    print(f"{source_name}: {len(articles)} articoli nuove uscite trovati")
     return articles
 
 
@@ -61,9 +93,12 @@ def fetch_all():
 def build_prompt(articles):
     lines = [
         "Sei un assistente editoriale cinematografico. "
-        "Ricevi notizie dal cinema americano in inglese. "
+        "Ricevi notizie sulle nuove uscite e annunci di film dal cinema americano, in inglese. "
         "Per ogni articolo traduci il contenuto in italiano in modo fluente e giornalistico. "
         "Mantieni i titoli originali in inglese. "
+        "Focalizzati esclusivamente su: nuove uscite, date di uscita annunciate, casting, "
+        "film in produzione, trailer, acquisizioni di diritti. "
+        "Ignora interviste, recensioni, classifiche e contenuti editoriali generici. "
         "Restituisci HTML ben formattato per una email, con sezioni divise per testata, "
         "titolo come link cliccabile e testo tradotto sotto. "
         "Usa uno stile pulito e professionale.\n"
