@@ -15,6 +15,7 @@ RSS_SOURCES = {
     "The Wrap":            "https://www.thewrap.com/category/movies/feed/",
     "IndieWire":           "https://www.indiewire.com/category/film/feed/",
     "Collider":            "https://collider.com/feed/",
+    "The Film Stage":      "https://thefilmstage.com/feed/",
 }
 
 # Account Bluesky verificati — notizie cinema e major studios
@@ -29,6 +30,7 @@ SUBSTACK_SOURCES = {
     "Further & Better":             "https://furtherandbetter.substack.com/feed",
     "FranchiseRe (Box Office)":     "https://franchisere.substack.com/feed",
     "Entertainment Strategy Guy":   "https://entertainment.substack.com/feed",
+    "Scott Mendelson":              "https://scottmendelson.substack.com/feed",
 }
 
 ARTICLES_PER_SITE = 3
