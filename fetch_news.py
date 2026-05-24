@@ -223,53 +223,29 @@ def fetch_all_bluesky():
     return results
 
 
-# ── PROMPT & EMAIL ────────────────────────────────────────────────────────────
+# ── TRADUZIONE GROQ ───────────────────────────────────────────────────────────
 
-def build_prompt(rss_articles, bluesky_posts, substack_articles):
+def build_translation_prompt(rss_articles, substack_articles, bluesky_posts):
+    """Chiede a Groq di tradurre solo i testi, restituendo JSON strutturato."""
     lines = [
         "Sei un assistente editoriale cinematografico italiano. "
-        "Ricevi notizie fresche (ultimi 2 giorni) dal cinema americano su film dei major studios "
-        "(Sony, Warner Bros, Universal, Disney/Marvel, Paramount). "
-        "Per ogni articolo o post traduci il contenuto in italiano in modo fluente e giornalistico. "
-        "Mantieni i titoli originali in inglese come link cliccabili dove disponibili. "
-        "Struttura la risposta come HTML per email, divisa in tre sezioni: "
-        "1) TESTATE GIORNALISTICHE (Variety, Deadline, ecc.) "
-        "2) NEWSLETTER SUBSTACK – INDUSTRY INSIDER "
-        "3) BLUESKY – ACCOUNT CINEMA "
-        "Per ogni sezione, sottodividi per fonte con titolo linkato e testo tradotto sotto. "
-        "Stile pulito e professionale.\n"
+        "Traduci in italiano fluente e giornalistico i seguenti contenuti dal cinema americano. "
+        "Per ogni voce restituisci SOLO un JSON array nel formato:\n"
+        '[{"source": "nome fonte", "title": "titolo originale", "link": "url", "translated": "testo tradotto in italiano"}]\n'
+        "Non aggiungere testo fuori dal JSON. Mantieni i titoli in inglese.\n\n"
     ]
 
-    lines.append("\n=== TESTATE GIORNALISTICHE ===")
     for source, items in rss_articles.items():
-        if not items:
-            continue
-        lines.append(f"\n--- {source.upper()} ---")
-        for i, art in enumerate(items, 1):
-            lines.append(f"{i}. Titolo: {art['title']}")
-            lines.append(f"   Link: {art['link']}")
-            lines.append(f"   Contenuto: {art['summary']}\n")
+        for art in items:
+            lines.append(f'SOURCE: {source} | TITLE: {art["title"]} | LINK: {art["link"]} | TEXT: {art["summary"]}')
 
-    lines.append("\n=== NEWSLETTER SUBSTACK – INDUSTRY INSIDER ===")
     for source, items in substack_articles.items():
-        if not items:
-            continue
-        lines.append(f"\n--- {source.upper()} ---")
-        for i, art in enumerate(items, 1):
-            lines.append(f"{i}. Titolo: {art['title']}")
-            lines.append(f"   Link: {art['link']}")
-            lines.append(f"   Contenuto: {art['summary']}\n")
+        for art in items:
+            lines.append(f'SOURCE: {source} (Substack) | TITLE: {art["title"]} | LINK: {art["link"]} | TEXT: {art["summary"]}')
 
-    lines.append("\n=== BLUESKY – INSIDER & ACCOUNT CINEMA ===")
     for account, posts in bluesky_posts.items():
-        if not posts:
-            continue
-        lines.append(f"\n--- {account.upper()} ---")
-        for i, post in enumerate(posts, 1):
-            lines.append(f"{i}. Post: {post['summary']}")
-            if post["link"]:
-                lines.append(f"   Link: {post['link']}")
-            lines.append("")
+        for post in posts:
+            lines.append(f'SOURCE: {account} (Bluesky) | TITLE: {post["title"]} | LINK: {post["link"]} | TEXT: {post["summary"]}')
 
     return "\n".join(lines)
 
@@ -295,10 +271,124 @@ def call_groq(prompt):
     return resp.json()["choices"][0]["message"]["content"]
 
 
+# ── HTML TEMPLATE ─────────────────────────────────────────────────────────────
+
+SECTION_ICONS = {
+    "rss":       "📰",
+    "substack":  "✉️",
+    "bluesky":   "🦋",
+}
+
+def render_article_card(art):
+    title = art.get("title", "")
+    link  = art.get("link", "")
+    text  = art.get("translated", art.get("summary", ""))
+    title_html = f'<a href="{link}" style="color:#1a1a2e;text-decoration:none;font-weight:700;font-size:15px;line-height:1.4;">{title}</a>' if link else f'<span style="font-weight:700;font-size:15px;">{title}</span>'
+    return f"""
+        <div style="background:#ffffff;border-radius:10px;padding:18px 22px;margin-bottom:14px;border-left:4px solid #e63946;box-shadow:0 1px 4px rgba(0,0,0,0.07);">
+          <p style="margin:0 0 8px 0;">{title_html}</p>
+          <p style="margin:0;color:#444;font-size:13px;line-height:1.6;">{text}</p>
+        </div>"""
+
+def render_source_block(source_name, articles):
+    cards = "".join(render_article_card(a) for a in articles)
+    return f"""
+      <div style="margin-bottom:10px;">
+        <p style="margin:0 0 10px 0;font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#888;">{source_name}</p>
+        {cards}
+      </div>"""
+
+def render_section(icon, title, source_map):
+    if not any(source_map.values()):
+        return ""
+    blocks = "".join(render_source_block(src, arts) for src, arts in source_map.items() if arts)
+    return f"""
+    <div style="margin-bottom:36px;">
+      <h2 style="margin:0 0 18px 0;font-size:18px;color:#1a1a2e;border-bottom:2px solid #e63946;padding-bottom:8px;">
+        {icon}&nbsp; {title}
+      </h2>
+      {blocks}
+    </div>"""
+
+def build_html_email(translated_items, rss_articles, substack_articles, bluesky_posts):
+    import json
+
+    # Mappa source → lista articoli tradotti
+    translated_map = {}
+    try:
+        raw = translated_items.strip()
+        # rimuovi eventuale markdown code block
+        raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("```").strip()
+        items = json.loads(raw)
+        for item in items:
+            src = item.get("source", "")
+            translated_map.setdefault(src, []).append(item)
+    except Exception as e:
+        print(f"JSON parse error: {e} — uso testo grezzo")
+        # fallback: usa testi originali non tradotti
+        for src, arts in {**rss_articles, **substack_articles, **bluesky_posts}.items():
+            translated_map[src] = arts
+
+    def get_translated(original_source, articles):
+        result = []
+        for art in articles:
+            match = next((t for t in translated_map.get(original_source, []) if art["title"][:40] in t.get("title", "")), None)
+            if match:
+                result.append({**art, "translated": match.get("translated", art.get("summary", ""))})
+            else:
+                result.append({**art, "translated": art.get("summary", "")})
+        return result
+
+    rss_translated      = {src: get_translated(src, arts) for src, arts in rss_articles.items()}
+    substack_translated = {src: get_translated(f"{src} (Substack)", arts) for src, arts in substack_articles.items()}
+    bluesky_translated  = {src: get_translated(f"{src} (Bluesky)", arts) for src, arts in bluesky_posts.items()}
+
+    today = datetime.now().strftime("%d %B %Y").upper()
+    sec_rss      = render_section("📰", "Testate Giornalistiche", rss_translated)
+    sec_substack = render_section("✉️", "Newsletter Substack — Industry Insider", substack_translated)
+    sec_bluesky  = render_section("🦋", "Bluesky — Insider & Account Cinema", bluesky_translated)
+
+    return f"""<!DOCTYPE html>
+<html lang="it">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f4f4f8;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f8;padding:32px 0;">
+    <tr><td align="center">
+      <table width="620" cellpadding="0" cellspacing="0" style="max-width:620px;width:100%;">
+
+        <!-- HEADER -->
+        <tr><td style="background:#1a1a2e;border-radius:12px 12px 0 0;padding:32px 36px;text-align:center;">
+          <p style="margin:0 0 4px 0;font-size:11px;letter-spacing:3px;color:#e63946;text-transform:uppercase;font-weight:700;">La tua rassegna stampa</p>
+          <h1 style="margin:0;font-size:30px;color:#ffffff;font-weight:800;letter-spacing:-0.5px;">Il Salotto di Max</h1>
+          <p style="margin:10px 0 0 0;font-size:13px;color:#aaa;">Cinema &amp; Major Studios &mdash; {today}</p>
+        </td></tr>
+
+        <!-- BODY -->
+        <tr><td style="background:#f4f4f8;padding:28px 24px;">
+          {sec_rss}
+          {sec_substack}
+          {sec_bluesky}
+        </td></tr>
+
+        <!-- FOOTER -->
+        <tr><td style="background:#1a1a2e;border-radius:0 0 12px 12px;padding:20px 36px;text-align:center;">
+          <p style="margin:0;font-size:11px;color:#666;">
+            Il Salotto di Max &mdash; Sony &bull; Warner Bros &bull; Universal &bull; Disney &bull; Paramount<br>
+            <span style="color:#444;">Fonti: Variety, Deadline, THR, The Wrap, IndieWire, Collider, The Film Stage, Substack, Bluesky</span>
+          </p>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+
 def send_email(html_body):
     today = datetime.now().strftime("%d/%m/%Y")
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"🎬 Cinema News – {today}"
+    msg["Subject"] = f"Il Salotto di Max – Cinema News {today}"
     msg["From"] = GMAIL_USER
     msg["To"] = EMAIL_TO
     msg.attach(MIMEText(html_body, "html"))
@@ -329,8 +419,9 @@ def main():
         return
 
     print("Chiamata a Groq per traduzione...")
-    prompt = build_prompt(rss_articles, bluesky_posts, substack_articles)
-    html_body = call_groq(prompt)
+    prompt = build_translation_prompt(rss_articles, substack_articles, bluesky_posts)
+    translated_json = call_groq(prompt)
+    html_body = build_html_email(translated_json, rss_articles, substack_articles, bluesky_posts)
 
     print("Invio email...")
     send_email(html_body)
