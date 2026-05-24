@@ -15,15 +15,18 @@ SOURCES = {
 
 ARTICLES_PER_SITE = 3
 
-# Query mirata solo su nuove uscite e annunci di film
-RELEASE_QUERY = "new movie film release date announced 2025 2026"
+# Due query distinte: uscite annunciate + film trending/in sala
+QUERIES = [
+    "new movie film release date announced trailer cast 2025 2026",
+    "movie film trending box office opening weekend now playing",
+]
 
 # Parole nel titolo che indicano contenuto da escludere
 EXCLUDE_TITLE_KEYWORDS = {
-    "interview", "review", "opinion", "column", "podcast", "ranking",
-    "best of", "worst of", "list", "quiz", "gallery", "photos", "watch",
-    "recap", "explainer", "analysis", "awards season", "box office report",
-    "streaming guide", "where to watch",
+    "interview", "opinion", "column", "podcast", "ranking",
+    "best of", "worst of", "quiz", "gallery", "photos",
+    "recap", "explainer", "streaming guide", "where to watch",
+    "talks about", "opens up", "speaks out", "reflects on",
 }
 
 TAVILY_API_KEY = os.environ["TAVILY_API_KEY"]
@@ -33,53 +36,52 @@ GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
 EMAIL_TO = os.environ.get("EMAIL_TO", GMAIL_USER)
 
 
-def is_release_news(title):
+def is_valid_article(title):
     title_lower = title.lower()
-    if any(kw in title_lower for kw in EXCLUDE_TITLE_KEYWORDS):
-        return False
-    release_signals = {
-        "release", "release date", "sets release", "coming to", "arrives",
-        "premiere", "first look", "trailer", "teaser", "greenlit", "green-lit",
-        "in production", "starts production", "begins filming", "wraps",
-        "acquired", "buys", "picks up", "lands", "sets", "announced",
-        "cast", "joins", "attached", "taps", "hires", "will star",
-    }
-    return any(kw in title_lower for kw in release_signals)
+    return not any(kw in title_lower for kw in EXCLUDE_TITLE_KEYWORDS)
 
 
 def fetch_from_tavily(source_name, domain):
-    resp = requests.post(
-        "https://api.tavily.com/search",
-        json={
-            "api_key": TAVILY_API_KEY,
-            "query": RELEASE_QUERY,
-            "search_depth": "advanced",
-            "topic": "news",
-            "days": 3,
-            "include_domains": [domain],
-            "max_results": 10,  # ne chiediamo di più per poter filtrare
-        },
-        timeout=30,
-    )
+    seen_urls = set()
+    candidates = []
+
+    for query in QUERIES:
+        resp = requests.post(
+            "https://api.tavily.com/search",
+            json={
+                "api_key": TAVILY_API_KEY,
+                "query": query,
+                "search_depth": "advanced",
+                "topic": "news",
+                "days": 2,
+                "include_domains": [domain],
+                "max_results": 10,
+            },
+            timeout=30,
+        )
     if not resp.ok:
         print(f"Tavily error per {source_name}: {resp.status_code} {resp.text}")
-        return []
-
-    results = resp.json().get("results", [])
-    articles = []
-    for r in results:
-        if len(articles) >= ARTICLES_PER_SITE:
-            break
-        title = r.get("title", "").strip()
-        if not is_release_news(title):
-            print(f"  [skip] {title}")
+        if not resp.ok:
+            print(f"Tavily error per {source_name}: {resp.status_code} {resp.text}")
             continue
-        articles.append({
-            "title": title,
-            "link": r.get("url", ""),
-            "summary": r.get("content", "")[:600].strip(),
-        })
-    print(f"{source_name}: {len(articles)} articoli nuove uscite trovati")
+
+        for r in resp.json().get("results", []):
+            url = r.get("url", "")
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+            title = r.get("title", "").strip()
+            if not is_valid_article(title):
+                print(f"  [skip] {title}")
+                continue
+            candidates.append({
+                "title": title,
+                "link": url,
+                "summary": r.get("content", "")[:600].strip(),
+            })
+
+    articles = candidates[:ARTICLES_PER_SITE]
+    print(f"{source_name}: {len(articles)} articoli trovati")
     return articles
 
 
@@ -93,15 +95,14 @@ def fetch_all():
 def build_prompt(articles):
     lines = [
         "Sei un assistente editoriale cinematografico. "
-        "Ricevi notizie sulle nuove uscite e annunci di film dal cinema americano, in inglese. "
+        "Ricevi notizie fresche (ultimi 2 giorni) dal cinema americano su: nuove uscite, "
+        "annunci di film, casting, trailer, film trending o attualmente al cinema. "
         "Per ogni articolo traduci il contenuto in italiano in modo fluente e giornalistico. "
-        "Mantieni i titoli originali in inglese. "
-        "Focalizzati esclusivamente su: nuove uscite, date di uscita annunciate, casting, "
-        "film in produzione, trailer, acquisizioni di diritti. "
-        "Ignora interviste, recensioni, classifiche e contenuti editoriali generici. "
-        "Restituisci HTML ben formattato per una email, con sezioni divise per testata, "
-        "titolo come link cliccabile e testo tradotto sotto. "
-        "Usa uno stile pulito e professionale.\n"
+        "Mantieni i titoli originali in inglese come link cliccabili. "
+        "NON includere interviste generiche sul cinema o contenuti editoriali non legati a un film specifico. "
+        "Struttura la risposta come HTML per email: una sezione per ogni testata giornalistica "
+        "(Variety, Hollywood Reporter, Deadline, The Wrap), con titolo linkato e testo tradotto sotto. "
+        "Stile pulito e professionale, senza CSS inline eccessivo.\n"
     ]
     for source, items in articles.items():
         if not items:
