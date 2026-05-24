@@ -15,28 +15,51 @@ FEEDS = {
 
 ARTICLES_PER_SITE = 3
 
+CINEMA_KEYWORDS = {
+    "film", "movie", "cinema", "box office", "director", "actor", "actress",
+    "screenplay", "script", "sequel", "prequel", "reboot", "premiere", "release",
+    "trailer", "casting", "cast", "studio", "production", "streaming", "netflix",
+    "amazon", "apple tv", "disney", "hulu", "a24", "warner", "universal",
+    "paramount", "sony pictures", "lionsgate", "miramax", "award", "oscar",
+    "golden globe", "cannes", "sundance", "toronto", "venice film", "bafta",
+    "animated", "documentary", "thriller", "horror", "comedy film", "biopic",
+    "blockbuster", "indie film", "short film", "feature film", "cinematographer",
+    "producer", "distributor", "box-office", "ticket sales", "limited series",
+    "miniseries",
+}
+
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 GMAIL_USER = os.environ["GMAIL_USER"]
 GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
 EMAIL_TO = os.environ.get("EMAIL_TO", GMAIL_USER)
 
 
+def is_cinema_related(title, summary):
+    text = (title + " " + summary).lower()
+    return any(kw in text for kw in CINEMA_KEYWORDS)
+
+
 def fetch_articles():
+    import re
     articles = {}
     for source, url in FEEDS.items():
         feed = feedparser.parse(url)
         items = []
-        for entry in feed.entries[:ARTICLES_PER_SITE]:
+        for entry in feed.entries:
+            if len(items) >= ARTICLES_PER_SITE:
+                break
             summary = entry.get("summary", entry.get("description", ""))
-            # strip basic HTML tags from summary
-            import re
             summary = re.sub(r"<[^>]+>", "", summary).strip()
+            title = entry.get("title", "").strip()
+            if not is_cinema_related(title, summary):
+                continue
             items.append({
-                "title": entry.get("title", "").strip(),
+                "title": title,
                 "link": entry.get("link", ""),
                 "summary": summary[:600],
             })
         articles[source] = items
+        print(f"{source}: {len(items)} articoli cinema trovati")
     return articles
 
 
