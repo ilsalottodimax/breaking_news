@@ -5,10 +5,10 @@ import requests
 import feedparser
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 # Feed RSS sezione cinema di ogni testata
-SOURCES = {
+RSS_SOURCES = {
     "Variety":             "https://variety.com/v/film/feed/",
     "Deadline":            "https://deadline.com/category/film/feed/",
     "Hollywood Reporter":  "https://www.hollywoodreporter.com/c/movies/feed/",
@@ -17,7 +17,16 @@ SOURCES = {
     "Collider":            "https://collider.com/feed/",
 }
 
+# Account Bluesky verificati — notizie cinema e major studios
+BLUESKY_ACCOUNTS = {
+    "DiscussingFilm":  "discussingfilm.net",
+    "Film Updates":    "thefilmupdates.bsky.social",
+    "THR Bluesky":     "thr.com",
+}
+
 ARTICLES_PER_SITE = 3
+BLUESKY_POSTS_PER_ACCOUNT = 3
+BLUESKY_API = "https://public.api.bsky.app/xrpc/app.bsky.feed.getAuthorFeed"
 
 MAJOR_STUDIOS = {
     "sony", "sony pictures", "columbia pictures",
@@ -54,6 +63,8 @@ def mentions_major_studio(title, summary):
     return any(studio in text for studio in MAJOR_STUDIOS)
 
 
+# ── RSS ──────────────────────────────────────────────────────────────────────
+
 def fetch_from_rss(source_name, feed_url):
     try:
         feed = feedparser.parse(feed_url)
@@ -78,29 +89,105 @@ def fetch_from_rss(source_name, feed_url):
 
         articles.append({"title": title, "link": link, "summary": summary})
 
-    print(f"{source_name}: {len(articles)} articoli trovati")
+    print(f"{source_name}: {len(articles)} articoli RSS trovati")
     return articles
 
 
-def fetch_all():
+def fetch_all_rss():
     articles = {}
-    for source_name, feed_url in SOURCES.items():
+    for source_name, feed_url in RSS_SOURCES.items():
         articles[source_name] = fetch_from_rss(source_name, feed_url)
     return articles
 
 
-def build_prompt(articles):
+# ── BLUESKY ──────────────────────────────────────────────────────────────────
+
+def fetch_from_bluesky(account_name, handle):
+    try:
+        resp = requests.get(
+            BLUESKY_API,
+            params={"actor": handle, "limit": 25},
+            timeout=15,
+        )
+        if not resp.ok:
+            print(f"Bluesky error {account_name}: {resp.status_code}")
+            return []
+    except Exception as e:
+        print(f"Errore Bluesky {account_name}: {e}")
+        return []
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=2)
+    posts = []
+
+    for item in resp.json().get("feed", []):
+        if len(posts) >= BLUESKY_POSTS_PER_ACCOUNT:
+            break
+
+        post = item.get("post", {})
+        record = post.get("record", {})
+        text = record.get("text", "").strip()
+        created_at = record.get("createdAt", "")
+
+        if not text:
+            continue
+
+        # filtra post più vecchi di 2 giorni
+        try:
+            post_time = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            if post_time < cutoff:
+                continue
+        except Exception:
+            continue
+
+        if not mentions_major_studio(text, ""):
+            continue
+
+        # estrai eventuale link embed
+        link = ""
+        embed = post.get("embed", {})
+        external = embed.get("external", {})
+        if external:
+            link = external.get("uri", "")
+
+        uri = post.get("uri", "")
+        if not link and uri:
+            parts = uri.split("/")
+            if len(parts) >= 2:
+                link = f"https://bsky.app/profile/{handle}/post/{parts[-1]}"
+
+        posts.append({"title": text[:120], "link": link, "summary": text[:600]})
+
+    print(f"{account_name} (Bluesky): {len(posts)} post trovati")
+    return posts
+
+
+def fetch_all_bluesky():
+    results = {}
+    for account_name, handle in BLUESKY_ACCOUNTS.items():
+        posts = fetch_from_bluesky(account_name, handle)
+        if posts:
+            results[account_name] = posts
+    return results
+
+
+# ── PROMPT & EMAIL ────────────────────────────────────────────────────────────
+
+def build_prompt(rss_articles, bluesky_posts):
     lines = [
         "Sei un assistente editoriale cinematografico italiano. "
-        "Ricevi notizie fresche dal cinema americano su film dei major studios "
+        "Ricevi notizie fresche (ultimi 2 giorni) dal cinema americano su film dei major studios "
         "(Sony, Warner Bros, Universal, Disney/Marvel, Paramount). "
-        "Per ogni articolo traduci il contenuto in italiano in modo fluente e giornalistico. "
-        "Mantieni i titoli originali in inglese come link cliccabili. "
-        "Struttura la risposta come HTML per email: una sezione per ogni testata, "
-        "con titolo linkato e testo tradotto sotto. "
+        "Per ogni articolo o post traduci il contenuto in italiano in modo fluente e giornalistico. "
+        "Mantieni i titoli originali in inglese come link cliccabili dove disponibili. "
+        "Struttura la risposta come HTML per email, divisa in due sezioni: "
+        "1) TESTATE GIORNALISTICHE (Variety, Deadline, ecc.) "
+        "2) BLUESKY - INSIDER & ACCOUNT CINEMA "
+        "Per ogni sezione, sottodividi per fonte con titolo linkato e testo tradotto sotto. "
         "Stile pulito e professionale.\n"
     ]
-    for source, items in articles.items():
+
+    lines.append("\n=== TESTATE GIORNALISTICHE ===")
+    for source, items in rss_articles.items():
         if not items:
             continue
         lines.append(f"\n--- {source.upper()} ---")
@@ -108,6 +195,18 @@ def build_prompt(articles):
             lines.append(f"{i}. Titolo: {art['title']}")
             lines.append(f"   Link: {art['link']}")
             lines.append(f"   Contenuto: {art['summary']}\n")
+
+    lines.append("\n=== BLUESKY – INSIDER & ACCOUNT CINEMA ===")
+    for account, posts in bluesky_posts.items():
+        if not posts:
+            continue
+        lines.append(f"\n--- {account.upper()} ---")
+        for i, post in enumerate(posts, 1):
+            lines.append(f"{i}. Post: {post['summary']}")
+            if post["link"]:
+                lines.append(f"   Link: {post['link']}")
+            lines.append("")
+
     return "\n".join(lines)
 
 
@@ -148,15 +247,21 @@ def send_email(html_body):
 
 def main():
     print("Fetching news via RSS...")
-    articles = fetch_all()
+    rss_articles = fetch_all_rss()
 
-    total = sum(len(v) for v in articles.values())
-    if total == 0:
-        print("Nessun articolo trovato, email non inviata.")
+    print("Fetching post Bluesky...")
+    bluesky_posts = fetch_all_bluesky()
+
+    total_rss = sum(len(v) for v in rss_articles.values())
+    total_bsky = sum(len(v) for v in bluesky_posts.values())
+    print(f"Totale: {total_rss} articoli RSS + {total_bsky} post Bluesky")
+
+    if total_rss + total_bsky == 0:
+        print("Nessun contenuto trovato, email non inviata.")
         return
 
-    print(f"Totale articoli: {total}. Chiamata a Groq per traduzione...")
-    prompt = build_prompt(articles)
+    print("Chiamata a Groq per traduzione...")
+    prompt = build_prompt(rss_articles, bluesky_posts)
     html_body = call_groq(prompt)
 
     print("Invio email...")
