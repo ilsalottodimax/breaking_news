@@ -24,6 +24,13 @@ BLUESKY_ACCOUNTS = {
     "THR Bluesky":     "thr.com",
 }
 
+# Newsletter Substack — industry insider letti da capi studio e distributori
+SUBSTACK_SOURCES = {
+    "Further & Better":             "https://furtherandbetter.substack.com/feed",
+    "FranchiseRe (Box Office)":     "https://franchisere.substack.com/feed",
+    "Entertainment Strategy Guy":   "https://entertainment.substack.com/feed",
+}
+
 ARTICLES_PER_SITE = 3
 BLUESKY_POSTS_PER_ACCOUNT = 3
 BLUESKY_API = "https://public.api.bsky.app/xrpc/app.bsky.feed.getAuthorFeed"
@@ -100,6 +107,50 @@ def fetch_all_rss():
     return articles
 
 
+# ── SUBSTACK ─────────────────────────────────────────────────────────────────
+
+def fetch_from_substack(source_name, feed_url):
+    try:
+        feed = feedparser.parse(feed_url)
+    except Exception as e:
+        print(f"Errore Substack {source_name}: {e}")
+        return []
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=5)
+    articles = []
+
+    for entry in feed.entries:
+        if len(articles) >= 2:
+            break
+        title = clean_html(entry.get("title", "")).strip()
+        summary = clean_html(entry.get("summary", entry.get("description", "")))[:600]
+        link = entry.get("link", "")
+
+        # filtra per data
+        published = entry.get("published_parsed")
+        if published:
+            pub_dt = datetime(*published[:6], tzinfo=timezone.utc)
+            if pub_dt < cutoff:
+                continue
+
+        if not is_valid_article(title):
+            continue
+
+        articles.append({"title": title, "link": link, "summary": summary})
+
+    print(f"{source_name} (Substack): {len(articles)} articoli trovati")
+    return articles
+
+
+def fetch_all_substack():
+    articles = {}
+    for source_name, feed_url in SUBSTACK_SOURCES.items():
+        result = fetch_from_substack(source_name, feed_url)
+        if result:
+            articles[source_name] = result
+    return articles
+
+
 # ── BLUESKY ──────────────────────────────────────────────────────────────────
 
 def fetch_from_bluesky(account_name, handle):
@@ -172,22 +223,33 @@ def fetch_all_bluesky():
 
 # ── PROMPT & EMAIL ────────────────────────────────────────────────────────────
 
-def build_prompt(rss_articles, bluesky_posts):
+def build_prompt(rss_articles, bluesky_posts, substack_articles):
     lines = [
         "Sei un assistente editoriale cinematografico italiano. "
         "Ricevi notizie fresche (ultimi 2 giorni) dal cinema americano su film dei major studios "
         "(Sony, Warner Bros, Universal, Disney/Marvel, Paramount). "
         "Per ogni articolo o post traduci il contenuto in italiano in modo fluente e giornalistico. "
         "Mantieni i titoli originali in inglese come link cliccabili dove disponibili. "
-        "Struttura la risposta come HTML per email, divisa in due sezioni: "
+        "Struttura la risposta come HTML per email, divisa in tre sezioni: "
         "1) TESTATE GIORNALISTICHE (Variety, Deadline, ecc.) "
-        "2) BLUESKY - INSIDER & ACCOUNT CINEMA "
+        "2) NEWSLETTER SUBSTACK – INDUSTRY INSIDER "
+        "3) BLUESKY – ACCOUNT CINEMA "
         "Per ogni sezione, sottodividi per fonte con titolo linkato e testo tradotto sotto. "
         "Stile pulito e professionale.\n"
     ]
 
     lines.append("\n=== TESTATE GIORNALISTICHE ===")
     for source, items in rss_articles.items():
+        if not items:
+            continue
+        lines.append(f"\n--- {source.upper()} ---")
+        for i, art in enumerate(items, 1):
+            lines.append(f"{i}. Titolo: {art['title']}")
+            lines.append(f"   Link: {art['link']}")
+            lines.append(f"   Contenuto: {art['summary']}\n")
+
+    lines.append("\n=== NEWSLETTER SUBSTACK – INDUSTRY INSIDER ===")
+    for source, items in substack_articles.items():
         if not items:
             continue
         lines.append(f"\n--- {source.upper()} ---")
@@ -249,19 +311,23 @@ def main():
     print("Fetching news via RSS...")
     rss_articles = fetch_all_rss()
 
+    print("Fetching newsletter Substack...")
+    substack_articles = fetch_all_substack()
+
     print("Fetching post Bluesky...")
     bluesky_posts = fetch_all_bluesky()
 
     total_rss = sum(len(v) for v in rss_articles.values())
+    total_sub = sum(len(v) for v in substack_articles.values())
     total_bsky = sum(len(v) for v in bluesky_posts.values())
-    print(f"Totale: {total_rss} articoli RSS + {total_bsky} post Bluesky")
+    print(f"Totale: {total_rss} RSS + {total_sub} Substack + {total_bsky} Bluesky")
 
-    if total_rss + total_bsky == 0:
+    if total_rss + total_sub + total_bsky == 0:
         print("Nessun contenuto trovato, email non inviata.")
         return
 
     print("Chiamata a Groq per traduzione...")
-    prompt = build_prompt(rss_articles, bluesky_posts)
+    prompt = build_prompt(rss_articles, bluesky_posts, substack_articles)
     html_body = call_groq(prompt)
 
     print("Invio email...")
