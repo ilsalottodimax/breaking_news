@@ -67,14 +67,16 @@ def call_groq(prompt):
             "Content-Type": "application/json",
         },
         json={
-            "model": "llama3-70b-8192",
+            "model": "llama-3.3-70b-versatile",
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3,
             "max_tokens": 4000,
         },
         timeout=60,
     )
-    resp.raise_for_status()
+    if not resp.ok:
+        print(f"Groq error {resp.status_code}: {resp.text}")
+        resp.raise_for_status()
     return resp.json()["choices"][0]["message"]["content"]
 
 
