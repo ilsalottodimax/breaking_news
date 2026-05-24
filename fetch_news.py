@@ -1,65 +1,60 @@
 import os
+import re
 import smtplib
-import feedparser
 import requests
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime
 
-FEEDS = {
-    "Variety": "https://variety.com/feed/",
-    "Hollywood Reporter": "https://www.hollywoodreporter.com/feed/",
-    "Deadline": "https://deadline.com/feed/",
-    "The Wrap": "https://www.thewrap.com/feed/",
+SOURCES = {
+    "Variety": "variety.com",
+    "Hollywood Reporter": "hollywoodreporter.com",
+    "Deadline": "deadline.com",
+    "The Wrap": "thewrap.com",
 }
 
 ARTICLES_PER_SITE = 3
+CINEMA_QUERY = "cinema film movie Hollywood release"
 
-CINEMA_KEYWORDS = {
-    "film", "movie", "cinema", "box office", "director", "actor", "actress",
-    "screenplay", "script", "sequel", "prequel", "reboot", "premiere", "release",
-    "trailer", "casting", "cast", "studio", "production", "streaming", "netflix",
-    "amazon", "apple tv", "disney", "hulu", "a24", "warner", "universal",
-    "paramount", "sony pictures", "lionsgate", "miramax", "award", "oscar",
-    "golden globe", "cannes", "sundance", "toronto", "venice film", "bafta",
-    "animated", "documentary", "thriller", "horror", "comedy film", "biopic",
-    "blockbuster", "indie film", "short film", "feature film", "cinematographer",
-    "producer", "distributor", "box-office", "ticket sales", "limited series",
-    "miniseries",
-}
-
+TAVILY_API_KEY = os.environ["TAVILY_API_KEY"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 GMAIL_USER = os.environ["GMAIL_USER"]
 GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
 EMAIL_TO = os.environ.get("EMAIL_TO", GMAIL_USER)
 
 
-def is_cinema_related(title, summary):
-    text = (title + " " + summary).lower()
-    return any(kw in text for kw in CINEMA_KEYWORDS)
+def fetch_from_tavily(source_name, domain):
+    resp = requests.post(
+        "https://api.tavily.com/search",
+        json={
+            "api_key": TAVILY_API_KEY,
+            "query": CINEMA_QUERY,
+            "search_depth": "basic",
+            "include_domains": [domain],
+            "max_results": ARTICLES_PER_SITE,
+        },
+        timeout=30,
+    )
+    if not resp.ok:
+        print(f"Tavily error per {source_name}: {resp.status_code} {resp.text}")
+        return []
+
+    results = resp.json().get("results", [])
+    articles = []
+    for r in results:
+        articles.append({
+            "title": r.get("title", "").strip(),
+            "link": r.get("url", ""),
+            "summary": r.get("content", "")[:600].strip(),
+        })
+    print(f"{source_name}: {len(articles)} articoli trovati")
+    return articles
 
 
-def fetch_articles():
-    import re
+def fetch_all():
     articles = {}
-    for source, url in FEEDS.items():
-        feed = feedparser.parse(url)
-        items = []
-        for entry in feed.entries:
-            if len(items) >= ARTICLES_PER_SITE:
-                break
-            summary = entry.get("summary", entry.get("description", ""))
-            summary = re.sub(r"<[^>]+>", "", summary).strip()
-            title = entry.get("title", "").strip()
-            if not is_cinema_related(title, summary):
-                continue
-            items.append({
-                "title": title,
-                "link": entry.get("link", ""),
-                "summary": summary[:600],
-            })
-        articles[source] = items
-        print(f"{source}: {len(items)} articoli cinema trovati")
+    for source_name, domain in SOURCES.items():
+        articles[source_name] = fetch_from_tavily(source_name, domain)
     return articles
 
 
@@ -67,18 +62,20 @@ def build_prompt(articles):
     lines = [
         "Sei un assistente editoriale cinematografico. "
         "Ricevi notizie dal cinema americano in inglese. "
-        "Per ogni articolo traduci il summary in italiano in modo fluente e giornalistico. "
+        "Per ogni articolo traduci il contenuto in italiano in modo fluente e giornalistico. "
         "Mantieni i titoli originali in inglese. "
-        "Restituisci HTML ben formattato per una email, con sezioni per ogni testata, "
-        "titolo come link cliccabile e summary tradotto sotto. "
-        "Usa uno stile pulito, senza CSS inline eccessivo.\n"
+        "Restituisci HTML ben formattato per una email, con sezioni divise per testata, "
+        "titolo come link cliccabile e testo tradotto sotto. "
+        "Usa uno stile pulito e professionale.\n"
     ]
     for source, items in articles.items():
+        if not items:
+            continue
         lines.append(f"\n--- {source.upper()} ---")
         for i, art in enumerate(items, 1):
             lines.append(f"{i}. Titolo: {art['title']}")
             lines.append(f"   Link: {art['link']}")
-            lines.append(f"   Summary: {art['summary']}\n")
+            lines.append(f"   Contenuto: {art['summary']}\n")
     return "\n".join(lines)
 
 
@@ -118,10 +115,15 @@ def send_email(html_body):
 
 
 def main():
-    print("Fetching RSS feeds...")
-    articles = fetch_articles()
+    print("Fetching news con Tavily...")
+    articles = fetch_all()
 
-    print("Chiamata a Groq per traduzione...")
+    total = sum(len(v) for v in articles.values())
+    if total == 0:
+        print("Nessun articolo trovato, email non inviata.")
+        return
+
+    print(f"Totale articoli: {total}. Chiamata a Groq per traduzione...")
     prompt = build_prompt(articles)
     html_body = call_groq(prompt)
 
