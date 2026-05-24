@@ -15,13 +15,20 @@ SOURCES = {
 
 ARTICLES_PER_SITE = 3
 
-# Due query distinte: uscite annunciate + film trending/in sala
+MAJOR_STUDIOS = {
+    "sony", "sony pictures", "columbia pictures",
+    "warner bros", "warner brothers", "hbo", "max",
+    "universal", "universal pictures", "amblin",
+    "disney", "walt disney", "marvel", "pixar", "lucasfilm", "searchlight",
+    "paramount", "paramount pictures", "miramax",
+}
+
+# Due query distinte: uscite/annunci + trending, filtrate sui major studios
 QUERIES = [
-    "new movie film release date announced trailer cast 2025 2026",
-    "movie film trending box office opening weekend now playing",
+    "Sony Warner Disney Universal Paramount movie film release announced trailer 2025 2026",
+    "Sony Warner Disney Universal Paramount movie film trending box office now playing",
 ]
 
-# Parole nel titolo che indicano contenuto da escludere
 EXCLUDE_TITLE_KEYWORDS = {
     "interview", "opinion", "column", "podcast", "ranking",
     "best of", "worst of", "quiz", "gallery", "photos",
@@ -34,6 +41,11 @@ GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 GMAIL_USER = os.environ["GMAIL_USER"]
 GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
 EMAIL_TO = os.environ.get("EMAIL_TO", GMAIL_USER)
+
+
+def mentions_major_studio(title, summary):
+    text = (title + " " + summary).lower()
+    return any(studio in text for studio in MAJOR_STUDIOS)
 
 
 def is_valid_article(title):
@@ -71,13 +83,17 @@ def fetch_from_tavily(source_name, domain):
                 continue
             seen_urls.add(url)
             title = r.get("title", "").strip()
+            summary = r.get("content", "")[:600].strip()
             if not is_valid_article(title):
-                print(f"  [skip] {title}")
+                print(f"  [skip - formato] {title}")
+                continue
+            if not mentions_major_studio(title, summary):
+                print(f"  [skip - studio] {title}")
                 continue
             candidates.append({
                 "title": title,
                 "link": url,
-                "summary": r.get("content", "")[:600].strip(),
+                "summary": summary,
             })
 
     articles = candidates[:ARTICLES_PER_SITE]
